@@ -344,8 +344,8 @@ func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
 			return
 		}
 
-		localAddress := ":5555"
-		remoteAddress := "192.168.1.203:5555"
+		localAddress := ":6001"
+		remoteAddress := "127.0.0.1:6000"
 		dataRate := 2.0
 		packetSize := 223
 
@@ -402,7 +402,7 @@ func listenCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
 			return
 		}
 
-		localAddress := ":5555"
+		localAddress := ":6001"
 
 		startFunc := func() {
 			pages.SwitchToPage("main")
