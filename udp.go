@@ -23,8 +23,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"os/user"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -37,6 +41,13 @@ var delayAfterCommands = time.Millisecond * 500
 
 const toMbps = 8.0 / 1.0e6
 const rateFormat = "%0.3f Mbps"
+
+type config struct {
+	LocalAddress  string
+	RemoteAddress string
+	DataRate      float64
+	PacketSize    int
+}
 
 type testInfoUI struct {
 	ctx             context.Context
@@ -65,13 +76,13 @@ type testInfoUI struct {
 
 func (ui *testInfoUI) running(testType string) {
 	queueUpdateAndDraw(ui.app, func() {
-		ui.testType.SetText(fmt.Sprintf("Running %s", testType))
+		ui.testType.SetText(fmt.Sprintf("%s", testType))
 	})
 }
 
-func (ui *testInfoUI) finished(testType string) {
+func (ui *testInfoUI) finished() {
 	queueUpdateAndDraw(ui.app, func() {
-		ui.testType.SetText(fmt.Sprintf("Finished %s", testType))
+		ui.testType.SetText("Idle")
 	})
 }
 
@@ -163,6 +174,52 @@ func (ui *testInfoUI) updateCounters() {
 	})
 }
 
+func loadConfig() (conf *config) {
+	conf = &config{}
+	conf.LocalAddress = ":6001"
+	conf.RemoteAddress = "127.0.0.1:6000"
+	conf.DataRate = 2.0
+	conf.PacketSize = 223
+
+	u, err := user.Current()
+	if err != nil {
+		log.Printf("Error: Couldn't get the current user: %v", err)
+	}
+
+	filename := filepath.Join(u.HomeDir, ".udp-tester.json")
+
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Printf("Warning: Settings file not found, will use default values.")
+		return conf
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	err = decoder.Decode(conf)
+	if err != nil {
+		log.Printf("Error: Couldn't read settings file.  Path: %v, Error: %v", filename, err)
+	}
+
+	return conf
+}
+
+func saveConfig(conf *config) {
+	u, err := user.Current()
+	if err != nil {
+		log.Printf("Error: Couldn't get the current user: %v", err)
+	}
+
+	filename := filepath.Join(u.HomeDir, ".udp-tester.json")
+
+	file, _ := os.Create(filename)
+	defer file.Close()
+	encoder := json.NewEncoder(file)
+	err = encoder.Encode(conf)
+	if err != nil {
+		log.Printf("Error: Couldn't save settings file.  Path: %v, Error: %v", filename, err)
+	}
+}
+
 func createApplication() (app *tview.Application) {
 	app = tview.NewApplication()
 	pages := tview.NewPages()
@@ -173,11 +230,16 @@ func createApplication() (app *tview.Application) {
 
 	log.SetOutput(logPanel)
 
+	conf := loadConfig()
+
 	commandList := createCommandList()
-	commandList.AddItem("Listen", "", 'l', listenCommand(pages, infoUI))
-	commandList.AddItem("Loopback Test", "", 't', loopbackTestCommand(pages, infoUI))
+	commandList.AddItem("Listen", "", 'l', listenCommand(pages, infoUI, conf))
+	commandList.AddItem("Loopback Test", "", 't', loopbackTestCommand(pages, infoUI, conf))
 	commandList.AddItem("Stop Test", "", 's', stopTestCommand(infoUI))
-	commandList.AddItem("Quit", "", 'q', app.Stop)
+	commandList.AddItem("Quit", "", 'q', func() {
+		saveConfig(conf)
+		app.Stop()
+	})
 
 	layout := createMainLayout(commandList, outputPanel)
 	pages.AddPage("main", layout, true, true)
@@ -185,7 +247,6 @@ func createApplication() (app *tview.Application) {
 	app.SetRoot(pages, true)
 
 	return app
-
 }
 
 func createInfoPanel(app *tview.Application) (infoUI *testInfoUI) {
@@ -198,7 +259,7 @@ func createInfoPanel(app *tview.Application) (infoUI *testInfoUI) {
 
 	infoUI.testType = tview.NewTextView()
 	infoUI.testType.SetBorder(true)
-	infoUI.testType.SetText("No Test Running")
+	infoUI.testType.SetText("Idle")
 	infoUI.testType.SetTextAlign(tview.AlignCenter)
 	infoPanel.AddItem(infoUI.testType, 3, 1, false)
 
@@ -330,11 +391,11 @@ func createModalForm(pages *tview.Pages, form tview.Primitive, height int, width
 	return modal
 }
 
-func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
+func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) func() {
 	return func() {
 		if infoUI.ctx != nil {
 			modal := tview.NewModal().
-				SetText("A test is already running.").
+				SetText("Something else is already running.").
 				AddButtons([]string{"OK"}).
 				SetDoneFunc(func(buttonIndex int, buttonLabel string) {
 					pages.SwitchToPage("main")
@@ -343,11 +404,6 @@ func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
 			pages.AddPage("modal", modal, true, true)
 			return
 		}
-
-		localAddress := ":6001"
-		remoteAddress := "127.0.0.1:6000"
-		dataRate := 2.0
-		packetSize := 223
 
 		startFunc := func() {
 			pages.SwitchToPage("main")
@@ -360,7 +416,7 @@ func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
 					cancel()
 					infoUI.ctx = nil
 				}()
-				loopbackTest(ctx, localAddress, remoteAddress, dataRate, packetSize, infoUI)
+				loopbackTest(ctx, conf.LocalAddress, conf.RemoteAddress, conf.DataRate, conf.PacketSize, infoUI)
 			}()
 		}
 
@@ -370,10 +426,10 @@ func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
 		}
 
 		form := tview.NewForm()
-		form.AddInputField("Local Address:", localAddress, 30, nil, func(value string) { localAddress = value })
-		form.AddInputField("Remote Address:", remoteAddress, 30, nil, func(value string) { remoteAddress = value })
-		form.AddInputField("Data Rate (Mbps):", strconv.FormatFloat(dataRate, 'f', -1, 64), 30, validFloat, func(value string) { dataRate, _ = strconv.ParseFloat(value, 64) })
-		form.AddInputField("Packet Size (bytes):", strconv.Itoa(packetSize), 30, validInt, func(value string) { packetSize, _ = strconv.Atoi(value) })
+		form.AddInputField("Local Address:", conf.LocalAddress, 30, nil, func(value string) { conf.LocalAddress = value })
+		form.AddInputField("Remote Address:", conf.RemoteAddress, 30, nil, func(value string) { conf.RemoteAddress = value })
+		form.AddInputField("Data Rate (Mbps):", strconv.FormatFloat(conf.DataRate, 'f', -1, 64), 30, validFloat, func(value string) { conf.DataRate, _ = strconv.ParseFloat(value, 64) })
+		form.AddInputField("Packet Size (bytes):", strconv.Itoa(conf.PacketSize), 30, validInt, func(value string) { conf.PacketSize, _ = strconv.Atoi(value) })
 		form.AddButton("Start Test", startFunc)
 		form.AddButton("Cancel", cancelFunc)
 		form.SetCancelFunc(cancelFunc)
@@ -388,11 +444,11 @@ func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
 	}
 }
 
-func listenCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
+func listenCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) func() {
 	return func() {
 		if infoUI.ctx != nil {
 			modal := tview.NewModal().
-				SetText("A test is already running.").
+				SetText("Something else is already running.").
 				AddButtons([]string{"OK"}).
 				SetDoneFunc(func(buttonIndex int, buttonLabel string) {
 					pages.SwitchToPage("main")
@@ -401,8 +457,6 @@ func listenCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
 			pages.AddPage("modal", modal, true, true)
 			return
 		}
-
-		localAddress := ":6001"
 
 		startFunc := func() {
 			pages.SwitchToPage("main")
@@ -415,7 +469,7 @@ func listenCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
 					cancel()
 					infoUI.ctx = nil
 				}()
-				listen(ctx, localAddress, infoUI)
+				listen(ctx, conf.LocalAddress, infoUI)
 			}()
 		}
 
@@ -425,7 +479,7 @@ func listenCommand(pages *tview.Pages, infoUI *testInfoUI) func() {
 		}
 
 		form := tview.NewForm()
-		form.AddInputField("Local Address:", localAddress, 30, nil, func(value string) { localAddress = value })
+		form.AddInputField("Local Address:", conf.LocalAddress, 30, nil, func(value string) { conf.LocalAddress = value })
 		form.AddButton("Start Listening", startFunc)
 		form.AddButton("Cancel", cancelFunc)
 		form.SetCancelFunc(cancelFunc)
@@ -451,8 +505,8 @@ func stopTestCommand(infoUI *testInfoUI) func() {
 func loopbackTest(ctx context.Context, localAddress string, remoteAddress string, sendRateInMbps float64, sendDataLength int, ui *testInfoUI) {
 	ui.reset()
 
-	ui.running("Loopback Test")
-	defer ui.finished("Loopback Test")
+	ui.running("Running Loopback Test")
+	defer ui.finished()
 
 	packetsPerSecond := sendRateInMbps / (float64(sendDataLength) * toMbps)
 	packetsPerNano := packetsPerSecond / float64((time.Second / time.Nanosecond))
@@ -544,7 +598,7 @@ func listen(ctx context.Context, localAddress string, ui *testInfoUI) {
 	ui.reset()
 
 	ui.running("Listening")
-	defer ui.finished("Listening")
+	defer ui.finished()
 
 	ui.localAddress(localAddress)
 
