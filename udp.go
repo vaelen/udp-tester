@@ -23,6 +23,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -47,6 +48,7 @@ type config struct {
 	RemoteAddress string
 	DataRate      float64
 	PacketSize    int
+	Data          []byte
 }
 
 type testInfoUI struct {
@@ -234,8 +236,10 @@ func createApplication() (app *tview.Application) {
 
 	commandList := createCommandList()
 	commandList.AddItem("Listen", "", 'l', listenCommand(pages, infoUI, conf))
-	commandList.AddItem("Loopback Test", "", 't', loopbackTestCommand(pages, infoUI, conf))
-	commandList.AddItem("Stop Test", "", 's', stopTestCommand(infoUI))
+	commandList.AddItem("Send 0s", "", '0', sendCommand(pages, infoUI, conf, 0x00))
+	commandList.AddItem("Send 1s", "", '1', sendCommand(pages, infoUI, conf, 0xff))
+	commandList.AddItem("Send Custom Data", "", 'd', sendCustomCommand(pages, infoUI, conf))
+	commandList.AddItem("Stop", "", 's', stop(infoUI))
 	commandList.AddItem("Quit", "", 'q', func() {
 		saveConfig(conf)
 		app.Stop()
@@ -380,32 +384,17 @@ func validInt(value string, lastChar rune) bool {
 	return err == nil
 }
 
-func createModalForm(pages *tview.Pages, form tview.Primitive, height int, width int) tview.Primitive {
-	modal := tview.NewFlex().SetDirection(tview.FlexColumn).
-		AddItem(nil, 0, 1, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(nil, 0, 1, false).
-			AddItem(form, height, 1, true).
-			AddItem(nil, 0, 1, false), width, 1, true).
-		AddItem(nil, 0, 1, false)
-	return modal
+func validHex(value string, lastChar rune) bool {
+	return len(value) == 0 ||
+		(lastChar >= '0' && lastChar <= '9') ||
+		(lastChar >= 'a' && lastChar <= 'f') ||
+		(lastChar >= 'A' && lastChar <= 'F')
 }
 
-func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) func() {
+func sendCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config, data byte) func() {
 	return func() {
-		if infoUI.ctx != nil {
-			modal := tview.NewModal().
-				SetText("Something else is already running.").
-				AddButtons([]string{"OK"}).
-				SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-					pages.SwitchToPage("main")
-					pages.RemovePage("modal")
-				})
-			pages.AddPage("modal", modal, true, true)
-			return
-		}
-
 		startFunc := func() {
+			stop(infoUI)()
 			pages.SwitchToPage("main")
 			pages.RemovePage("modal")
 			ctx, cancel := context.WithCancel(context.Background())
@@ -416,7 +405,11 @@ func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) f
 					cancel()
 					infoUI.ctx = nil
 				}()
-				loopbackTest(ctx, conf.LocalAddress, conf.RemoteAddress, conf.DataRate, conf.PacketSize, infoUI)
+				sendData := make([]byte, conf.PacketSize)
+				for i := 0; i < conf.PacketSize; i++ {
+					sendData[i] = data
+				}
+				send(ctx, conf.LocalAddress, conf.RemoteAddress, conf.DataRate, sendData, infoUI)
 			}()
 		}
 
@@ -430,12 +423,65 @@ func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) f
 		form.AddInputField("Remote Address:", conf.RemoteAddress, 30, nil, func(value string) { conf.RemoteAddress = value })
 		form.AddInputField("Data Rate (Mbps):", strconv.FormatFloat(conf.DataRate, 'f', -1, 64), 30, validFloat, func(value string) { conf.DataRate, _ = strconv.ParseFloat(value, 64) })
 		form.AddInputField("Packet Size (bytes):", strconv.Itoa(conf.PacketSize), 30, validInt, func(value string) { conf.PacketSize, _ = strconv.Atoi(value) })
-		form.AddButton("Start Test", startFunc)
+		form.AddButton("Start", startFunc)
 		form.AddButton("Cancel", cancelFunc)
 		form.SetCancelFunc(cancelFunc)
 		form.SetButtonsAlign(tview.AlignCenter)
 
-		form.SetBorder(true).SetTitle("Loopback Test Options")
+		form.SetBorder(true).SetTitle(fmt.Sprintf("Send 0x%02X and Listen", data))
+
+		modal := createModalForm(pages, form, 13, 55)
+
+		pages.AddPage("modal", modal, true, true)
+
+	}
+}
+
+func createModalForm(pages *tview.Pages, form tview.Primitive, height int, width int) tview.Primitive {
+	modal := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(form, height, 1, true).
+			AddItem(nil, 0, 1, false), width, 1, true).
+		AddItem(nil, 0, 1, false)
+	return modal
+}
+
+func sendCustomCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) func() {
+	return func() {
+		startFunc := func() {
+			stop(infoUI)()
+			pages.SwitchToPage("main")
+			pages.RemovePage("modal")
+			ctx, cancel := context.WithCancel(context.Background())
+			infoUI.ctx = ctx
+			infoUI.cancel = cancel
+			go func() {
+				defer func() {
+					cancel()
+					infoUI.ctx = nil
+				}()
+				send(ctx, conf.LocalAddress, conf.RemoteAddress, conf.DataRate, conf.Data, infoUI)
+			}()
+		}
+
+		cancelFunc := func() {
+			pages.SwitchToPage("main")
+			pages.RemovePage("modal")
+		}
+
+		form := tview.NewForm()
+		form.AddInputField("Local Address:", conf.LocalAddress, 30, nil, func(value string) { conf.LocalAddress = value })
+		form.AddInputField("Remote Address:", conf.RemoteAddress, 30, nil, func(value string) { conf.RemoteAddress = value })
+		form.AddInputField("Data Rate (Mbps):", strconv.FormatFloat(conf.DataRate, 'f', -1, 64), 30, validFloat, func(value string) { conf.DataRate, _ = strconv.ParseFloat(value, 64) })
+		form.AddInputField("Data (hex):", fmt.Sprintf("%X", conf.Data), 30, validHex, func(value string) { conf.Data, _ = hex.DecodeString(value) })
+		form.AddButton("Start", startFunc)
+		form.AddButton("Cancel", cancelFunc)
+		form.SetCancelFunc(cancelFunc)
+		form.SetButtonsAlign(tview.AlignCenter)
+
+		form.SetBorder(true).SetTitle("Send and Listen")
 
 		modal := createModalForm(pages, form, 13, 55)
 
@@ -446,19 +492,8 @@ func loopbackTestCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) f
 
 func listenCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) func() {
 	return func() {
-		if infoUI.ctx != nil {
-			modal := tview.NewModal().
-				SetText("Something else is already running.").
-				AddButtons([]string{"OK"}).
-				SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-					pages.SwitchToPage("main")
-					pages.RemovePage("modal")
-				})
-			pages.AddPage("modal", modal, true, true)
-			return
-		}
-
 		startFunc := func() {
+			stop(infoUI)()
 			pages.SwitchToPage("main")
 			pages.RemovePage("modal")
 			ctx, cancel := context.WithCancel(context.Background())
@@ -480,12 +515,12 @@ func listenCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) func() 
 
 		form := tview.NewForm()
 		form.AddInputField("Local Address:", conf.LocalAddress, 30, nil, func(value string) { conf.LocalAddress = value })
-		form.AddButton("Start Listening", startFunc)
+		form.AddButton("Start", startFunc)
 		form.AddButton("Cancel", cancelFunc)
 		form.SetCancelFunc(cancelFunc)
 		form.SetButtonsAlign(tview.AlignCenter)
 
-		form.SetBorder(true).SetTitle("Listen Options")
+		form.SetBorder(true).SetTitle("Listen")
 
 		modal := createModalForm(pages, form, 13, 55)
 
@@ -494,7 +529,7 @@ func listenCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) func() 
 	}
 }
 
-func stopTestCommand(infoUI *testInfoUI) func() {
+func stop(infoUI *testInfoUI) func() {
 	return func() {
 		if infoUI.cancel != nil {
 			infoUI.cancel()
@@ -502,11 +537,13 @@ func stopTestCommand(infoUI *testInfoUI) func() {
 	}
 }
 
-func loopbackTest(ctx context.Context, localAddress string, remoteAddress string, sendRateInMbps float64, sendDataLength int, ui *testInfoUI) {
+func send(ctx context.Context, localAddress string, remoteAddress string, sendRateInMbps float64, sendData []byte, ui *testInfoUI) {
 	ui.reset()
 
-	ui.running("Running Loopback Test")
+	ui.running("Sending and Listening")
 	defer ui.finished()
+
+	sendDataLength := len(sendData)
 
 	packetsPerSecond := sendRateInMbps / (float64(sendDataLength) * toMbps)
 	packetsPerNano := packetsPerSecond / float64((time.Second / time.Nanosecond))
@@ -516,11 +553,6 @@ func loopbackTest(ctx context.Context, localAddress string, remoteAddress string
 	ui.remoteAddress(remoteAddress)
 	ui.interval(sendInterval)
 	ui.dataSize(sendDataLength)
-
-	sendData := make([]byte, sendDataLength)
-	for i := 0; i < sendDataLength; i++ {
-		sendData[i] = 0xff
-	}
 
 	client, err := NewDataClient(remoteAddress, localAddress)
 	if err != nil {
