@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -236,8 +237,9 @@ func createApplication() (app *tview.Application) {
 
 	commandList := createCommandList()
 	commandList.AddItem("Listen", "", 'l', listenCommand(pages, infoUI, conf))
-	commandList.AddItem("Send 0s", "", '0', sendCommand(pages, infoUI, conf, 0x00))
-	commandList.AddItem("Send 1s", "", '1', sendCommand(pages, infoUI, conf, 0xff))
+	commandList.AddItem("Send 0s", "", '0', sendCommand(pages, infoUI, conf, 0x00, false))
+	commandList.AddItem("Send 1s", "", '1', sendCommand(pages, infoUI, conf, 0xff, false))
+	commandList.AddItem("Send Random Data", "", 'r', sendCommand(pages, infoUI, conf, 0x00, true))
 	commandList.AddItem("Send Custom Data", "", 'd', sendCustomCommand(pages, infoUI, conf))
 	commandList.AddItem("Stop", "", 's', stop(infoUI))
 	commandList.AddItem("Quit", "", 'q', func() {
@@ -391,7 +393,7 @@ func validHex(value string, lastChar rune) bool {
 		(lastChar >= 'A' && lastChar <= 'F')
 }
 
-func sendCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config, data byte) func() {
+func sendCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config, data byte, sendRandomData bool) func() {
 	return func() {
 		startFunc := func() {
 			stop(infoUI)()
@@ -406,8 +408,12 @@ func sendCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config, data byte
 					infoUI.ctx = nil
 				}()
 				sendData := make([]byte, conf.PacketSize)
-				for i := 0; i < conf.PacketSize; i++ {
-					sendData[i] = data
+				if sendRandomData {
+					rand.Read(sendData)
+				} else {
+					for i := 0; i < conf.PacketSize; i++ {
+						sendData[i] = data
+					}
 				}
 				send(ctx, conf.LocalAddress, conf.RemoteAddress, conf.DataRate, sendData, infoUI)
 			}()
@@ -579,12 +585,12 @@ func send(ctx context.Context, localAddress string, remoteAddress string, sendRa
 				ui.receivedPacket(dataSize)
 				if dataSize != sendDataLength {
 					ui.sizeError()
-					log.Printf("Received packet with wrong data size. From: %v, Error: %v, Data Size: %v, Data: %X", r.Address, r.Error, dataSize, r.Data)
+					//log.Printf("Received packet with wrong data size. From: %v, Error: %v, Data Size: %v, Data: %X", r.Address, r.Error, dataSize, r.Data)
 				}
 
 				if !bytes.Equal(sendData, r.Data) {
 					ui.dataError()
-					log.Printf("Received packet with wrong data value. From: %v, Error: %v, Data Size: %v, Data: %X", r.Address, r.Error, dataSize, r.Data)
+					//log.Printf("Received packet with wrong data value. From: %v, Error: %v, Data Size: %v, Data: %X", r.Address, r.Error, dataSize, r.Data)
 				}
 
 				if r.Error != nil {
