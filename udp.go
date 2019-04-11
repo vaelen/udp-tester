@@ -50,6 +50,7 @@ type config struct {
 	DataRate      float64
 	PacketSize    int
 	Data          []byte
+	HeaderSize    int
 }
 
 type testInfoUI struct {
@@ -415,7 +416,7 @@ func sendCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config, data byte
 						sendData[i] = data
 					}
 				}
-				send(ctx, conf.LocalAddress, conf.RemoteAddress, conf.DataRate, sendData, infoUI)
+				send(ctx, conf.LocalAddress, conf.RemoteAddress, conf.DataRate, sendData, infoUI, conf.HeaderSize)
 			}()
 		}
 
@@ -429,6 +430,7 @@ func sendCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config, data byte
 		form.AddInputField("Remote Address:", conf.RemoteAddress, 30, nil, func(value string) { conf.RemoteAddress = value })
 		form.AddInputField("Data Rate (Mbps):", strconv.FormatFloat(conf.DataRate, 'f', -1, 64), 30, validFloat, func(value string) { conf.DataRate, _ = strconv.ParseFloat(value, 64) })
 		form.AddInputField("Packet Size (bytes):", strconv.Itoa(conf.PacketSize), 30, validInt, func(value string) { conf.PacketSize, _ = strconv.Atoi(value) })
+		form.AddInputField("Header Size (bytes):", strconv.Itoa(conf.HeaderSize), 30, validInt, func(value string) { conf.HeaderSize, _ = strconv.Atoi(value) })
 		form.AddButton("Start", startFunc)
 		form.AddButton("Cancel", cancelFunc)
 		form.SetCancelFunc(cancelFunc)
@@ -468,7 +470,7 @@ func sendCustomCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) fun
 					cancel()
 					infoUI.ctx = nil
 				}()
-				send(ctx, conf.LocalAddress, conf.RemoteAddress, conf.DataRate, conf.Data, infoUI)
+				send(ctx, conf.LocalAddress, conf.RemoteAddress, conf.DataRate, conf.Data, infoUI, conf.HeaderSize)
 			}()
 		}
 
@@ -482,6 +484,7 @@ func sendCustomCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) fun
 		form.AddInputField("Remote Address:", conf.RemoteAddress, 30, nil, func(value string) { conf.RemoteAddress = value })
 		form.AddInputField("Data Rate (Mbps):", strconv.FormatFloat(conf.DataRate, 'f', -1, 64), 30, validFloat, func(value string) { conf.DataRate, _ = strconv.ParseFloat(value, 64) })
 		form.AddInputField("Data (hex):", fmt.Sprintf("%X", conf.Data), 30, validHex, func(value string) { conf.Data, _ = hex.DecodeString(value) })
+		form.AddInputField("Header Size (bytes):", strconv.Itoa(conf.HeaderSize), 30, validInt, func(value string) { conf.HeaderSize, _ = strconv.Atoi(value) })
 		form.AddButton("Start", startFunc)
 		form.AddButton("Cancel", cancelFunc)
 		form.SetCancelFunc(cancelFunc)
@@ -510,7 +513,7 @@ func listenCommand(pages *tview.Pages, infoUI *testInfoUI, conf *config) func() 
 					cancel()
 					infoUI.ctx = nil
 				}()
-				listen(ctx, conf.LocalAddress, infoUI)
+				listen(ctx, conf.LocalAddress, infoUI, conf.HeaderSize)
 			}()
 		}
 
@@ -543,7 +546,7 @@ func stop(infoUI *testInfoUI) func() {
 	}
 }
 
-func send(ctx context.Context, localAddress string, remoteAddress string, sendRateInMbps float64, sendData []byte, ui *testInfoUI) {
+func send(ctx context.Context, localAddress string, remoteAddress string, sendRateInMbps float64, sendData []byte, ui *testInfoUI, headerSize int) {
 	ui.reset()
 
 	ui.running("Sending and Listening")
@@ -581,14 +584,15 @@ func send(ctx context.Context, localAddress string, remoteAddress string, sendRa
 			case <-stop:
 				return
 			case r := <-client.Receive():
-				dataSize := len(r.Data)
+				data := r.Data[headerSize:]
+				dataSize := len(data)
 				ui.receivedPacket(dataSize)
 				if dataSize != sendDataLength {
 					ui.sizeError()
 					//log.Printf("Received packet with wrong data size. From: %v, Error: %v, Data Size: %v, Data: %X", r.Address, r.Error, dataSize, r.Data)
 				}
 
-				if !bytes.Equal(sendData, r.Data) {
+				if !bytes.Equal(sendData, data) {
 					ui.dataError()
 					//log.Printf("Received packet with wrong data value. From: %v, Error: %v, Data Size: %v, Data: %X", r.Address, r.Error, dataSize, r.Data)
 				}
@@ -632,7 +636,7 @@ func send(ctx context.Context, localAddress string, remoteAddress string, sendRa
 
 }
 
-func listen(ctx context.Context, localAddress string, ui *testInfoUI) {
+func listen(ctx context.Context, localAddress string, ui *testInfoUI, headerSize int) {
 	ui.reset()
 
 	ui.running("Listening")
@@ -661,7 +665,8 @@ func listen(ctx context.Context, localAddress string, ui *testInfoUI) {
 			case <-stop:
 				return
 			case r := <-client.Receive():
-				dataSize := len(r.Data)
+				data := r.Data[headerSize:]
+				dataSize := len(data)
 				ui.receivedPacket(dataSize)
 				if r.Error != nil {
 					log.Printf("Error receiving, shutting down. Error: %v", r.Error)
